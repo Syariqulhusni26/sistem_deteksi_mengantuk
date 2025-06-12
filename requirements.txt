@@ -1,0 +1,11 @@
+streamlit
+playsound
+cv2
+dlib
+pygame
+numpy
+distance
+datetime
+threading
+tempfile
+os
