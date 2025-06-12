@@ -1,11 +1,7 @@
 streamlit
-playsound
-cv2
+playsound==1.2.2
+opencv-python
 dlib
 pygame
 numpy
-distance
-datetime
-threading
-tempfile
-os
+scipy
