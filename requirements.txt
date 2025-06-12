@@ -1,6 +1,7 @@
 streamlit
 playsound==1.2.2
 opencv-python
+dlib
 pygame
 numpy
 scipy
