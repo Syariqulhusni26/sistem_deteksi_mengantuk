@@ -1,444 +1,363 @@
-import streamlit as st
-from playsound import playsound
+import os
+import time # untuk timer waktu
 import cv2
 import dlib
+import winsound
 import pygame
-import numpy as np
-import time
+import math
 from scipy.spatial import distance
-from datetime import datetime
-import threading
-import tempfile
-import os
 
-# Konfigurasi halaman Streamlit
-st.set_page_config(
-    page_title="Driver Drowsiness Detection",
-    page_icon="🚗",
-    layout="wide"
-)
+# Load Model file Landmark
+model_path = "shape_predictor_68_face_landmarks copy.dat"
 
-# Inisialisasi session state
-if 'detector' not in st.session_state:
-    st.session_state.detector = None
-if 'predictor' not in st.session_state:
-    st.session_state.predictor = None
-if 'log_data' not in st.session_state:
-    st.session_state.log_data = []
-if 'camera_active' not in st.session_state:
-    st.session_state.camera_active = False
+# Load model deteksi wajah dari dlib
+detector = dlib.get_frontal_face_detector()
 
-# Konstanta
+# Load Model predictor untuk mendeteksi landmark wajah
+predictor = dlib.shape_predictor(model_path)
+
+# Membuat landmark mata kiri dan kanan
 LEFT_EYE_INDEX = list(range(36, 42))
 RIGHT_EYE_INDEX = list(range(42, 48))
+
+# Variabel untuk membuat ambang batas EAR dibawah 0,25
 EAR_THRESHOLD = 0.25
+
+# Variabel untuk waktu agar bunyika alarm ketika mata tertutup
 CLOSED_EYE_TIME_THRESHOLD = 1.0
+
+# Variabel untuk mencatat LOG tidur
+LOG_FILE = "drowsiness_log.txt"
+
+# Variabel untuk melihat ambang batas mendeteksi kepala menunduk
 NOD_THRESHOLD = 8
-ALARM_COOLDOWN = 5
 
-# Variabel global untuk tracking
-if 'eye_closed_start_time' not in st.session_state:
-    st.session_state.eye_closed_start_time = None
-if 'head_turn_start_time' not in st.session_state:
-    st.session_state.head_turn_start_time = None
-if 'yawn_start_time' not in st.session_state:
-    st.session_state.yawn_start_time = None
-if 'last_alarm_time' not in st.session_state:
-    st.session_state.last_alarm_time = 0
+# Inisialisasi pygame mixer untuk suara dari mp3
+pygame.mixer.init()
 
-def load_models():
-    """Load dlib models"""
-    try:
-        # Inisialisasi pygame untuk audio
-        pygame.mixer.init()
-        
-        # Load detector wajah
-        detector = dlib.get_frontal_face_detector()
-        
-        # Load predictor - coba beberapa nama file yang umum
-        predictor_files = [
-            "shape_predictor_68_face_landmarks.dat",
-            "shape_predictor_68_face_landmarks copy.dat",
-            "models/shape_predictor_68_face_landmarks.dat"
-        ]
-        
-        predictor = None
-        for file_path in predictor_files:
-            if os.path.exists(file_path):
-                try:
-                    predictor = dlib.shape_predictor(file_path)
-                    st.success(f"✅ Model predictor berhasil dimuat dari: {file_path}")
-                    break
-                except Exception as e:
-                    st.warning(f"⚠️ Gagal memuat {file_path}: {e}")
-                    continue
-        
-        if predictor is None:
-            st.warning("⚠️ File model predictor tidak ditemukan. Sistem akan berjalan dalam mode deteksi wajah saja.")
-            st.info("💡 Download model dari: https://github.com/davisking/dlib-models/blob/master/shape_predictor_68_face_landmarks.dat.bz2")
-        
-        return detector, predictor
-    except Exception as e:
-        st.error(f"❌ Error loading models: {e}")
-        return None, None
+# Variabel global untuk tracking waktu mata tertutup
+eye_closed_start_time = None
 
+# Variabel global untuk tracking kepala menoleh kekiri dan kekanan
+head_turn_start_time = None
+
+# Variabel global untuk tracking supir menguap
+yawn_start_time = None
+
+# Variabel penghitung deteksi
+count_drowsy = 0
+count_eye_closed = 0
+count_head_turn = 0
+count_head_right_left = 0
+count_yawn = 0
+
+# Variabel untuk menyimpan waktu alarm terakhir berbunyi
+last_alarm_time = 0  # Menyimpan waktu terakhir alarm berbunyi
+alarm_cooldown = 5   # Jeda alarm dalam detik
+
+
+# Fungsi untuk memutar suara alarm
+def play_alarm():
+    # pygame.mixer.music.load("Alarm.mp3")  # Sesuaikan dengan nama file MP3 kamu
+    pygame.mixer.music.load("Alarm.mp3")
+    pygame.mixer.music.play()
+    
+def play_alarm1():
+    # pygame.mixer.music.load("Alarm.mp3")  # Sesuaikan dengan nama file MP3 kamu
+    pygame.mixer.music.load("Alarm1.mp3")
+    pygame.mixer.music.play()
+    
+def play_alarm2():
+    # pygame.mixer.music.load("Alarm.mp3")  # Sesuaikan dengan nama file MP3 kamu
+    pygame.mixer.music.load("Alarm2.mp3")
+    pygame.mixer.music.play()
+    
+def play_alarm3():
+    # pygame.mixer.music.load("Alarm.mp3")  # Sesuaikan dengan nama file MP3 kamu
+    pygame.mixer.music.load("Alarm3.mp3")
+    pygame.mixer.music.play()    
+    
+# Fungsi untuk mencatat waktu tidur ke dalam file lgo
+def log_drowsiness():
+    with open(LOG_FILE, "a") as log :
+        log.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Supir mengantuk!\n")
+        print("[LOG] Supir mengantuk, dicatat dalam log.")
+
+# Fungsi input kamera video
+def get_video_stream(source=0):
+    video_strean = cv2.VideoCapture(source)
+    return video_strean
+    
+# Fungsi untuk menghitung aspek rasio mata dari landmarks Wajah
 def calculate_ear(eye):
-    """Menghitung Eye Aspect Ratio (EAR)"""
-    # Jarak vertikal
+    
+    # Variabel untuk menghitung jarak vertikal
     A = distance.euclidean(eye[1], eye[5])
     B = distance.euclidean(eye[2], eye[4])
-    
-    # Jarak horizontal
+
+    # Variabel utnuk menghitung jarak horizontal dari kedua mata
     C = distance.euclidean(eye[0], eye[3])
     
-    # Rumus EAR
+    # Rumus mencari EAR
     ear = (A + B) / (2.0 * C)
     return ear
 
-def log_drowsiness_event(event_type):
-    """Mencatat event kantuk ke session state"""
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    log_entry = {
-        'timestamp': timestamp,
-        'event': event_type
-    }
-    st.session_state.log_data.append(log_entry)
 
-last_alarm_time = {"eye_closed": 0, "head_turn": 0, "yawning": 0}
-ALARM_COOLDOWN = 5  # Detik
-
-def play_audio_alert(alert_type):
-    current_time = time.time()
-    if current_time - last_alarm_time[alert_type] < ALARM_COOLDOWN:
-        return  # Jangan mainkan alarm yang sama berulang kali dalam waktu singkat
-
-    last_alarm_time[alert_type] = current_time
-
-    def play_sound():
-        if alert_type == "eye_closed":
-            playsound("Alarm.mp3")
-        elif alert_type == "head_turn":
-            playsound("Alarm2.mp3")
-        elif alert_type == "yawning":
-            playsound("Alarm3.mp3")
-
-    threading.Thread(target=play_sound, daemon=True).start()
-
-def detect_drowsiness_features(frame, detector, predictor):
-    """Deteksi fitur kantuk dari frame"""
-    if predictor is None:
-        return frame, {"status": "Model tidak tersedia"}
+# Fungsi untuk mendeteksi wajah menggunakan Dlib
+def detect_faces_and_eye(frame, detector, predictor):
     
+    global eye_closed_start_time # Variabel Global waktu mata tertutup
+    global head_turn_start_time # Variabel Global waktu kepala turun
+    global last_alarm_time  # Variabel Global waktu terakhir
+    global yawn_start_time  # Variabel Global waktu menguap
+        
+    # global counter juga di sini
+    global count_drowsy, count_eye_closed, count_head_turn, count_yawn, count_head_right_left
+
+    # Variabel untuk mengkonversi gambar ke grayscale
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    
+    # Variabel untuk mendeteksi wajah dalam frame
     faces = detector(gray)
+    left_eye, right_eye = None, None
+    ear = 1.0
     
-    results = {
-        "faces_detected": len(faces),
-        "ear": 1.0,
-        "mar": 0.0,
-        "head_position": "center",
-        "alerts": []
-    }
-    
-    current_time = time.time()
+    # Variabel untuk mendeteksi  supir menguap
+    mar = 0.0
     
     for face in faces:
-        landmarks = predictor(gray, face)
+        # Variabel untuk mendapatkan landmark wajah
+        landmark = predictor(gray, face)
         
-        # Ekstrak koordinat mata
-        left_eye = [(landmarks.part(n).x, landmarks.part(n).y) for n in range(36, 42)]
-        right_eye = [(landmarks.part(n).x, landmarks.part(n).y) for n in range(42, 48)]
+        #variabel untuk membuat titik titik pada landmark mata kiri dan kanan
+        left_eye = [(landmark.part(n).x, landmark.part(n).y) for n in range(36, 42)]
+        right_eye = [(landmark.part(n).x, landmark.part(n).y) for n in range(42, 48)]
         
-        # Hitung EAR
+        # Variabel untuk menghitung nilai EAR pada kedua mata
         left_ear = calculate_ear(left_eye)
         right_ear = calculate_ear(right_eye)
+        
+        # Variabel untuk Rata rata EAR pada kedua mata
         ear = (left_ear + right_ear) / 2.0
-        results["ear"] = ear
         
-        # Deteksi mata tertutup
-        if ear < EAR_THRESHOLD:
-            if st.session_state.eye_closed_start_time is None:
-                st.session_state.eye_closed_start_time = current_time
-            elif current_time - st.session_state.eye_closed_start_time >= CLOSED_EYE_TIME_THRESHOLD:
-                if current_time - st.session_state.last_alarm_time > ALARM_COOLDOWN:
-                    results["alerts"].append("Mata tertutup terlalu lama!")
-                    log_drowsiness_event("Mata tertutup")
-                    st.session_state.last_alarm_time = current_time
-        else:
-            st.session_state.eye_closed_start_time = None
-        
-        # Deteksi kepala menunduk
-        nose = (landmarks.part(27).x, landmarks.part(27).y)
-        chin = (landmarks.part(8).x, landmarks.part(8).y)
+        # 1. Fitur untuk deteksi kepala menunduk
+        head_down = False
+
+        nose = (landmark.part(27).x, landmark.part(27).y)
+        chin = (landmark.part(8).x, landmark.part(8).y)
+
+        # Hitung jarak vertikal antara hidung dan dagu
         head_tilt = abs(nose[1] - chin[1])
-        
+
+        # # Tambahkan visual garis dari hidung ke dagu
+        # cv2.line(frame, nose, chin, (0, 0, 255), 2)
+
+        # # Debug nilai head_tilt
+        # print(f"[DEBUG] Head tilt (hidung ke dagu): {head_tilt}")
+
+        # Threshold dinamis (misal wajah dekat ke kamera, head_tilt > 50)
+        NOD_THRESHOLD = 115  # Bisa disesuaikan dari hasil pengamatan
+
+        current_time = time.time()
         if head_tilt < NOD_THRESHOLD:
-            results["alerts"].append("Kepala menunduk!")
-            log_drowsiness_event("Kepala menunduk")
-        
-        # Deteksi kepala menoleh
-        nose_x = landmarks.part(30).x
-        mid_face_x = (landmarks.part(36).x + landmarks.part(45).x) // 2
-        
-        if nose_x < mid_face_x - 20:
-            results["head_position"] = "left"
-        elif nose_x > mid_face_x + 20:
-            results["head_position"] = "right"
+            if current_time - last_alarm_time > alarm_cooldown:
+                count_drowsy += 1
+                count_head_turn += 1
+                print("[ALERT] Kepala menunduk! Supir mungkin mengantuk.")
+                winsound.Beep(1000, 500)
+                play_alarm()
+                log_drowsiness()
+                last_alarm_time = current_time
+                head_down = True
+            
+        #2.  Fitur untuk deteksi mata supir tertutup 
+        # Perulangan untuk mengecek apakah mata tertutup atau tidak
+        if ear < EAR_THRESHOLD:
+            if eye_closed_start_time is None :
+                eye_closed_start_time = time.time() # Memulai waktu mundur
+            elif time.time() - eye_closed_start_time >= CLOSED_EYE_TIME_THRESHOLD:
+                current_time = time.time()
+                if current_time - last_alarm_time > alarm_cooldown:
+                    count_drowsy += 1
+                    count_eye_closed += 1
+                    print("[ALERT] Jangan Mengantuk !!!")
+                    winsound.Beep(5000, 900)
+                    play_alarm1()  # Bunyi alarm
+                    log_drowsiness() # Mencatat Log
+                    last_alarm_time = current_time
         else:
-            results["head_position"] = "center"
+            eye_closed_start_time = None # Timer direset ketika mata terbuka
         
-        if results["head_position"] in ["left", "right"]:
-            if st.session_state.head_turn_start_time is None:
-                st.session_state.head_turn_start_time = current_time
-            elif current_time - st.session_state.head_turn_start_time > 2:
-                if current_time - st.session_state.last_alarm_time > ALARM_COOLDOWN:
-                    results["alerts"].append("Menoleh terlalu lama!")
-                    log_drowsiness_event("Menoleh terlalu lama")
-                    st.session_state.last_alarm_time = current_time
+        #3.  Fitur untuk deteksi supir menoleh kekanan atau kekiri
+        # Variabel untuk mengambil kordinat landmark hidung
+        nose_x = landmark.part(30).x
+        
+        #Variabel untuk mengambil kordinat tengah wajah
+        mid_face_x = (landmark.part(36).x + landmark.part(45).x) // 2
+        
+        # buat if else jika hidung terlalu ke kanan atau kekiri dari tengah wajah
+        
+        if nose_x < mid_face_x - 20 : # Ketika kepala menoleh kekiri
+            head_direction = "left"
+        elif nose_x > mid_face_x + 20: # Ketika kepala menoleh ke kanan
+            head_direction = "right"
         else:
-            st.session_state.head_turn_start_time = None
+            head_direction = "center"
+            
+        if head_direction in["left", "right"]:
+            if head_turn_start_time is None :
+                head_turn_start_time = time.time() # Fungsi untuk memulai waktu
+            elif time.time() - head_turn_start_time > 2:
+                current_time = time.time()
+                if current_time - last_alarm_time > alarm_cooldown:  # Cek jeda alarm
+                    print("[ALERT] Tetap Fokus Saat Berkendara!!! Jangan Menoleh Terlalu Lama")
+                    count_drowsy += 1
+                    count_head_right_left += 1
+                    winsound.Beep(1500, 300)
+                    play_alarm2()
+                    log_drowsiness() # Mencatat Log
+                    last_alarm_time = current_time
+        else:
+            head_turn_start_time = None
         
-        # Deteksi menguap
-        upper_lip = (landmarks.part(51).y + landmarks.part(62).y) / 2
-        lower_lip = (landmarks.part(57).y + landmarks.part(66).y) / 2
-        mouth_width = abs(landmarks.part(48).x - landmarks.part(54).x)
+        #4.  Fitur untuk deteksi supir menguap
+        # Variabel untuk mengambil kordinat mulut
+        upper_lip = (landmark.part(51).y + landmark.part(62).y) / 2
+        lower_lip = (landmark.part(57).y + landmark.part(66).y) / 2
+        mouth_with = abs(landmark.part(48).x - landmark.part(54).x) 
         
-        mar = abs(upper_lip - lower_lip) / mouth_width if mouth_width > 0 else 0
-        results["mar"] = mar
+        # Variabel untuk menghitung MAR (Mouth Aspect Ratio)
+        mar = abs(upper_lip - lower_lip) / mouth_with
+        
+        # Buat If Else jika mulut terbuka, maka beri peringatan
         
         if mar > 0.5:
-            if st.session_state.yawn_start_time is None:
-                st.session_state.yawn_start_time = current_time
-            elif current_time - st.session_state.yawn_start_time > 1.3:
-                if current_time - st.session_state.last_alarm_time > ALARM_COOLDOWN:
-                    results["alerts"].append("Menguap terdeteksi!")
-                    log_drowsiness_event("Menguap")
-                    st.session_state.last_alarm_time = current_time
+            if yawn_start_time is None:
+                yawn_start_time = time.time()
+            elif time.time() - yawn_start_time > 1.3:
+                current_time = time.time()
+                if current_time - last_alarm_time > alarm_cooldown :
+                    print("[ALERT] Supir Menguap!!! Istirahat Sejenak")
+                    count_drowsy += 1
+                    count_yawn += 1
+                    winsound.Beep(1700, 400)
+                    play_alarm3()
+                    log_drowsiness()
+                    last_alarm_time = current_time
         else:
-            st.session_state.yawn_start_time = None
+            yawn_start_time = None
         
-        # Gambar deteksi pada frame
-        x, y, w, h = face.left(), face.top(), face.width(), face.height()
-        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-        
-        # Gambar titik mata
-        for (ex, ey) in left_eye + right_eye:
-            cv2.circle(frame, (ex, ey), 2, (255, 255, 255), -1)
+    return faces, left_eye, right_eye, ear, mar
     
-    return frame, results
+# Mengatur Resolusi kamera
+def get_video_stream():
+    cap = cv2.VideoCapture(0)
+    
+    # Set resolusi ke 1280x720 (HD)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+    return cap
+
+SMOOTHING_FACTOR = 0.3
+prev_face_coords = None
+prev_eye_coords = None
 
 def main():
-    st.title("🚗 Driver Drowsiness Detection System")
-    st.markdown("---")
-    
-    # Sidebar untuk kontrol
-    with st.sidebar:
-        st.header("⚙️ Pengaturan")
-        
-        # Pengaturan threshold
-        ear_threshold = st.slider("EAR Threshold", 0.1, 0.5, EAR_THRESHOLD, 0.01)
-        time_threshold = st.slider("Waktu Mata Tertutup (detik)", 0.5, 3.0, CLOSED_EYE_TIME_THRESHOLD, 0.1)
-        
-        st.markdown("---")
-        
-        # Status sistem
-        st.header("📊 Status Sistem")
-        if st.session_state.detector is None:
-            st.error("Model belum dimuat")
-            if st.button("Load Models"):
-                detector, predictor = load_models()
-                st.session_state.detector = detector
-                st.session_state.predictor = predictor
-                if detector:
-                    st.success("Model berhasil dimuat!")
-                    st.rerun()
-        else:
-            st.success("Model siap digunakan")
-    
-    # Main content area
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        st.header("📹 Video Stream")
-        
-        # Placeholder untuk video
-        video_placeholder = st.empty()
-        
-        # Kontrol kamera
-        col_start, col_stop = st.columns(2)
-        with col_start:
-            start_camera = st.button("🎥 Start Camera", disabled=st.session_state.camera_active)
-        with col_stop:
-            stop_camera = st.button("⏹️ Stop Camera", disabled=not st.session_state.camera_active)
-        
-        # Inisialisasi variabel untuk real-time data
-        if 'current_ear' not in st.session_state:
-            st.session_state.current_ear = 0.30
-        if 'current_head_pos' not in st.session_state:
-            st.session_state.current_head_pos = "Center"
-        if 'current_mar' not in st.session_state:
-            st.session_state.current_mar = 0.20
-        
-        # Kamera real-time dengan OpenCV
-        if start_camera and st.session_state.detector:
-            st.session_state.camera_active = True
-            
-            # Inisialisasi kamera
-            cap = cv2.VideoCapture(0)
-            
-            if not cap.isOpened():
-                st.error("❌ Tidak dapat mengakses kamera. Pastikan kamera terhubung dan tidak digunakan aplikasi lain.")
-            else:
-                st.success("✅ Kamera berhasil terhubung!")
-                
-                # Loop untuk video streaming
-                while st.session_state.camera_active:
-                    ret, frame = cap.read()
-                    
-                    if not ret:
-                        st.error("❌ Gagal membaca frame dari kamera")
-                        break
-                    
-                    # Flip frame horizontal agar seperti cermin
-                    frame = cv2.flip(frame, 1)
-                    
-                    # Deteksi wajah dan fitur kantuk
-                    if st.session_state.predictor is not None:
-                        processed_frame, results = detect_drowsiness_features(
-                            frame, st.session_state.detector, st.session_state.predictor
-                        )
-                        
-                        for alert in results["alerts"]:
-                            if "Mata tertutup" in alert:
-                                play_audio_alert("eye_closed")
-                            elif "Menoleh" in alert:
-                                play_audio_alert("head_turn")
-                            elif "Menguap" in alert:
-                                play_audio_alert("yawning")
+    global prev_face_coords, prev_eye_coords
+    global count_drowsy, count_eye_closed, count_head_turn, count_head_right_left, count_yawn
 
-                        
-                        # Update real-time data
-                        st.session_state.current_ear = results.get("ear", 0.30)
-                        st.session_state.current_head_pos = results.get("head_position", "Center")
-                        st.session_state.current_mar = results.get("mar", 0.20)
-                        
-                        # Tampilkan alerts
-                        for alert in results.get("alerts", []):
-                            st.warning(f"🚨 {alert}")
-                    else:
-                        processed_frame = frame
-                        # Gambar kotak deteksi wajah sederhana tanpa landmarks
-                        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                        faces = st.session_state.detector(gray)
-                        
-                        for face in faces:
-                            x, y, w, h = face.left(), face.top(), face.width(), face.height()
-                            cv2.rectangle(processed_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                            cv2.putText(processed_frame, "Face Detected", (x, y-10), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    
-                    # Konversi frame ke RGB untuk Streamlit
-                    processed_frame_rgb = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
-                    
-                    # Tampilkan frame di Streamlit
-                    video_placeholder.image(processed_frame_rgb, channels="RGB", use_container_width=True)
-                    
-                    # Small delay to prevent too much CPU usage
-                    time.sleep(0.03)  # ~30 FPS
-                
-                # Release kamera ketika selesai
-                cap.release()
-                
-        if stop_camera:
-            st.session_state.camera_active = False
-            video_placeholder.empty()
-            st.info("⏹️ Kamera dihentikan")
-    
-    
-    
-    with col2:
-        st.header("📈 Monitoring")
-        
-        # Metrics real-time
-        if st.session_state.camera_active:
-            # Update metrics dengan data real-time
-            ear_value = st.session_state.current_ear
-            head_pos = st.session_state.current_head_pos
-            mar_value = st.session_state.current_mar
-            
-            # Tentukan status berdasarkan nilai
-            ear_status = "⚠️ Mengantuk" if ear_value < ear_threshold else "✅ Normal"
-            head_status = "✅ Baik" if head_pos == "Center" else f"⚠️ {head_pos}"
-            mar_status = "⚠️ Menguap" if mar_value > 0.5 else "✅ Normal"
-            
-            st.metric("EAR Value", f"{ear_value:.2f}", ear_status)
-            st.metric("Posisi Kepala", head_pos, head_status)
-            st.metric("MAR Value", f"{mar_value:.2f}", mar_status)
-        else:
-            st.metric("EAR Value", "0.30", "Standby")
-            st.metric("Posisi Kepala", "Center", "Standby")
-            st.metric("MAR Value", "0.20", "Standby")
-        
-        # Alert panel
-        st.subheader("🚨 Alert Status")
-        if st.session_state.camera_active:
-            current_time = datetime.now().strftime('%H:%M:%S')
-            if st.session_state.current_ear < ear_threshold:
-                st.error(f"🚨 [{current_time}] MATA TERTUTUP!")
-            elif st.session_state.current_head_pos != "Center":
-                st.warning(f"⚠️ [{current_time}] KEPALA MENOLEH!")
-            elif st.session_state.current_mar > 0.5:
-                st.warning(f"⚠️ [{current_time}] MENGUAP TERDETEKSI!")
+    video_stream = get_video_stream()
+
+    while True:
+        ret, frame = video_stream.read()
+        if not ret:
+            break  # Jika kamera tidak terbuka, keluar dari loop
+
+        # Deteksi wajah dan fitur
+        faces, left_eye, right_eye, ear, mar = detect_faces_and_eye(frame, detector, predictor)
+
+        for face in faces:
+            x, y, w, h = (face.left(), face.top(), face.width(), face.height())
+
+            # ➤ Smooth kotak wajah
+            if prev_face_coords is None:
+                prev_face_coords = (x, y, w, h)
             else:
-                st.success(f"✅ [{current_time}] Status Normal")
-        else:
-            st.info("📱 Sistem dalam mode standby")
-        
-        # Log events
-        st.subheader("📝 Log Events")
-        if st.session_state.log_data:
-            # Tampilkan log dalam container yang bisa di-scroll
-            log_container = st.container()
-            with log_container:
-                for log in st.session_state.log_data[-10:]:  # Show last 10 events
-                    st.text(f"{log['timestamp']}: {log['event']}")
-        else:
-            st.text("Belum ada event tercatat")
-        
-        if st.button("🗑️ Clear Log"):
-            st.session_state.log_data = []
-            st.rerun()
-    
-    # Informasi sistem
-    st.markdown("---")
-    st.header("ℹ️ Informasi Sistem")
-    
-    col_info1, col_info2, col_info3 = st.columns(3)
-    with col_info1:
-        st.metric("Total Events", len(st.session_state.log_data))
-    with col_info2:
-        st.metric("EAR Threshold", f"{ear_threshold:.2f}")
-    with col_info3:
-        st.metric("Time Threshold", f"{time_threshold:.1f}s")
-    
-    # Instructions
-    with st.expander("📖 Cara Penggunaan"):
-        st.markdown("""
-        1. **Load Models**: Klik tombol "Load Models" di sidebar
-        2. **Start Camera**: Klik "Start Camera" untuk memulai deteksi
-        3. **Monitor**: Pantau metrics dan alerts di panel kanan
-        4. **Alerts**: Sistem akan memberikan peringatan jika:
-           - Mata tertutup terlalu lama (EAR < threshold)
-           - Kepala menunduk (mengantuk)
-           - Kepala menoleh terlalu lama
-           - Terdeteksi menguap
-        
-        **Catatan**: Untuk implementasi penuh, diperlukan:
-        - File model `shape_predictor_68_face_landmarks.dat`
-        - File audio alarm (MP3)
-        - Server dengan akses kamera
-        """)
+                x = int(prev_face_coords[0] * (1 - SMOOTHING_FACTOR) + x * SMOOTHING_FACTOR)
+                y = int(prev_face_coords[1] * (1 - SMOOTHING_FACTOR) + y * SMOOTHING_FACTOR)
+                w = int(prev_face_coords[2] * (1 - SMOOTHING_FACTOR) + w * SMOOTHING_FACTOR)
+                h = int(prev_face_coords[3] * (1 - SMOOTHING_FACTOR) + h * SMOOTHING_FACTOR)
+                prev_face_coords = (x, y, w, h)
+
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+            # ➤ Gambar titik-titik mata dengan smoothing
+            if left_eye and right_eye:
+                all_eyes = left_eye + right_eye
+                if prev_eye_coords is None:
+                    prev_eye_coords = all_eyes
+                else:
+                    smoothed_eyes = []
+                    for i in range(len(all_eyes)):
+                        px, py = prev_eye_coords[i]
+                        cx, cy = all_eyes[i]
+                        sx = int(px * (1 - SMOOTHING_FACTOR) + cx * SMOOTHING_FACTOR)
+                        sy = int(py * (1 - SMOOTHING_FACTOR) + cy * SMOOTHING_FACTOR)
+                        smoothed_eyes.append((sx, sy))
+                    prev_eye_coords = smoothed_eyes
+
+                    for (ex, ey) in smoothed_eyes:
+                        cv2.circle(frame, (ex, ey), 2, (255, 255, 255), -1)
+
+        # Menampilkan info counter di frame
+        info_text = [
+            f"Drowsy Count     : {count_drowsy}",
+            f"Mata Tertutup    : {count_eye_closed}",
+            f"Kepala Menunduk  : {count_head_turn}",
+            f"Kepala Menoleh   : {count_head_right_left}",
+            f"Menguap          : {count_yawn}"
+        ]
+
+        # Tentukan posisi dan ukuran box info
+        # Ukuran font dan spasi
+        font_scale = 0.5
+        line_spacing = 20
+        text_color = (0, 255, 255)
+        font = cv2.FONT_HERSHEY_DUPLEX
+
+        # Dapatkan ukuran frame
+        frame_height, frame_width = frame.shape[:2]
+
+        # Hitung tinggi box info
+        box_height = line_spacing * len(info_text) + 20
+        box_width = 270  # sesuaikan lebar box
+
+        # Posisi pojok kanan bawah
+        x = frame_width - box_width - 10
+        y = frame_height - box_height - 10
+
+        # Gambar background semi-transparan
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (x - 5, y - 5), (x + box_width, y + box_height), (0, 0, 0), -1)
+        alpha = 0.5
+        cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+
+        # Tampilkan teks
+        for i, text in enumerate(info_text):
+            text_y = y + 20 + i * line_spacing
+            cv2.putText(frame, text, (x + 10, text_y), font,
+                        font_scale, text_color, 1, cv2.LINE_AA)
+
+
+
+        cv2.imshow("Deteksi Mata & Wajah", frame)
+
+        if cv2.waitKey(1) & 0xFF == ord("q"):  # Tekan 'q' untuk keluar
+            break
+
+    video_stream.release()
+    cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()
-
